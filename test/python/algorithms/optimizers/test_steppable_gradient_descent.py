@@ -52,7 +52,7 @@ class TestGradientDescent(QiskitAlgorithmsTestCase):
 
         initial_point = np.array([1, 0.5, -2])
 
-        optimizer = GradientDescent(maxiter=200, learning_rate=learning_rate,perturbation = 0.01)
+        optimizer = GradientDescent(maxiter=200, learning_rate=learning_rate, perturbation=0.01)
 
         result = optimizer.minimize(fun=objective, x0=initial_point, jac=grad)
 
