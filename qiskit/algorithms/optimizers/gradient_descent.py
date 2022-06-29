@@ -13,16 +13,23 @@
 """A standard gradient descent optimizer."""
 
 from dataclasses import dataclass
-from typing import Dict, Any, Union, Callable, Optional, Tuple, List, Iterator
+from typing import Dict, Any, Union, Callable, Optional, Tuple, List, Iterator, Generator
 import numpy as np
 from .optimizer import Optimizer, OptimizerSupportLevel, OptimizerResult, POINT
-from .steppable_optimizer import AskObject, TellObject, OptimizerState, SteppableOptimizer
+from .steppable_optimizer import AskData, TellData, OptimizerState, SteppableOptimizer
 
 CALLBACK = Callable[[int, np.ndarray, float, float], None]
 
 
-def constant(eta=0.01):
-    """Yield a constant."""
+def constant_generator(eta: float = 0.01) -> Generator[float, None, None]:
+    """Returns a python generator that always yields the same value.
+
+    Args:
+        eta: The value to yield.
+
+    Yields:
+        The learning rate for the next iteration.
+    """
 
     while True:
         yield eta
@@ -49,7 +56,7 @@ class GradientDescent(SteppableOptimizer):
     for a small learning rate :math:`\eta > 0`.
 
     You can either provide the analytic gradient :math:`\vec\nabla f` as ``gradient_function``
-    in the ``minimize`` method, or, if you do not provide it, use a finite difference approximation
+    in the :meth:`~.minimize` method, or, if you do not provide it, use a finite difference approximation
     of the gradient. To adapt the size of the perturbation in the finite difference gradients,
     set the ``perturbation`` property in the initializer.
 
@@ -139,28 +146,28 @@ class GradientDescent(SteppableOptimizer):
             initial_point = np.random.normal(0, 1, size=(100,))
 
             optimizer = GradientDescent(maxiter=20)
-            optimizer.initialize(x0=initial_point, fun=objective, jac=grad)
+            optimizer.start(x0=initial_point, fun=objective, jac=grad)
 
             for _ in range(20):
-                ask_object = optimizer.ask()
+                ask_data = optimizer.ask()
                 evaluated_gradient = None
 
                 while evaluated_gradient is None:
-                    evaluated_gradient = grad(ask_object.x_center)
-                    optimizer._state.njev += 1
+                    evaluated_gradient = grad(ask_data.x_center)
+                    optimizer.state.njev += 1
 
-                optmizer._state.nit += 1
+                optmizer.state.nit += 1
 
-                tell_object = TellObject(eval_jac=evaluated_gradient)
-                optimizer.tell(ask_object=ask_object, tell_object=tell_object)
+                tell_data = TellData(eval_jac=evaluated_gradient)
+                optimizer.tell(ask_data=ask_data, tell_data=tell_data)
 
             result = optimizer.create_result()
 
-    In case the user isn't dealing with complicated function and is more familiar with step by step
+    In case the user isn't dealing with complicated functI am not 100% sure about it, so if on and is more familiar with step by step
     optimization algorithms, :meth:`~.step` has been created to acts as a wrapper for :meth:`~.ask`
     and :meth:`~.tell`.
     In the same spirit the method :meth:`~.minimize` will optimize the function and return the result
-    without directly.
+    directly.
 
     To see other libraries that use this interface one can visit:
     https://optuna.readthedocs.io/en/stable/tutorial/20_recipes/009_ask_and_tell.html
@@ -170,13 +177,13 @@ class GradientDescent(SteppableOptimizer):
 
     def __init__(
         self,
-        maxiter: int = 1000,
+        maxiter: int = 100,
         learning_rate: Union[float, Callable[[], Iterator]] = 0.01,
         tol: float = 1e-7,
         callback: Optional[CALLBACK] = None,
         perturbation: Optional[float] = None,
     ) -> None:
-        r"""
+        """
         Args:
             maxiter: The maximum number of iterations.
             learning_rate: A constant or generator yielding learning rates for the parameter
@@ -186,13 +193,51 @@ class GradientDescent(SteppableOptimizer):
             perturbation: If no gradient is passed to :meth:`~.minimize` the gradient is
                 approximated with a symmetric finite difference scheme with ``perturbation``
                 perturbation in both directions (defaults to 1e-2 if required).
-                Ignored if a gradient callable is passed to `~.minimize`.
+                Ignored when we have an explicit function for the gradient.
         """
-        super().__init__(maxiter=maxiter, callback=callback)
-        self._state: GradientDescentState = None
-        self.learning_rate = learning_rate
-        self.perturbation = perturbation
-        self.tol = tol
+        super().__init__(maxiter=maxiter)
+        self.callback = callback
+        self._state: Optional[GradientDescentState] = None
+        self._learning_rate = learning_rate
+        self._perturbation = perturbation
+        self._tol = tol
+
+    @property
+    def learning_rate(self) -> Union[float, Callable[[], Iterator]]:
+        """Returns the learning rate. It can be either a constant value or a function that returns
+        generators."""
+        return self._learning_rate
+
+    @learning_rate.setter
+    def learning_rate(self, learning_rate: Union[float, Callable[[], Iterator]]) -> None:
+        """Set the learning rate.
+        The learning rate provided needs to be a function that returns a generator.
+        If a constant is passed, the optimizer will use it for all iterations.
+        """
+        self._learning_rate = learning_rate
+
+    @property
+    def tol(self) -> float:
+        """Returns the tolerance of the optimizer.
+        Any step with smaller stepsize than this value will stop the optimization."""
+        return self._tol
+
+    @tol.setter
+    def tol(self, tol: float) -> None:
+        """Set the tolerance."""
+        self._tol = tol
+
+    @property
+    def perturbation(self) -> Optional[float]:
+        """Returns the perturbation.
+        This is the perturbation used in the finite difference gradient approximation.
+        """
+        return self._perturbation
+
+    @perturbation.setter
+    def perturbation(self, perturbation: Optional[float]) -> None:
+        """Set the perturbation."""
+        self._perturbation = perturbation
 
     def _callback_wrapper(self) -> None:
         """
@@ -203,17 +248,17 @@ class GradientDescent(SteppableOptimizer):
         """
         if self.callback is not None:
             self.callback(
-                self._state.nfev,
-                self._state.x,
-                self._state.fun(self._state.x),
-                self._state.stepsize,
+                self.state.nfev,
+                self.state.x,
+                self.state.fun(self.state.x),
+                self.state.stepsize,
             )
 
     @property
     def settings(self) -> Dict[str, Any]:
         # if learning rate or perturbation are custom iterators expand them
         if callable(self.learning_rate):
-            iterator = self.learning_rate()
+            iterator = self._learning_rate()
             learning_rate = np.array([next(iterator) for _ in range(self.maxiter)])
         else:
             learning_rate = self.learning_rate
@@ -226,78 +271,89 @@ class GradientDescent(SteppableOptimizer):
             "callback": self.callback,
         }
 
-    def ask(self) -> AskObject:
+    def ask(self) -> AskData:
         """
-        For gradient descent this method simply returns an
-        :class:`qiskit.algorithms.optimizers.AskObject` containing the current point for the
-        gradient to be evaluated, a parameter epsilon in case the gradient has to be approximated
-        and a bool flag telling the prefered way of evaluating the gradient.
+        Returns an object with the data needed in order to evaluate the gradient.
+        If this object contains a gradient function the gradient can be evaluated directly. Otherwise
+        approximate it with a finite difference scheme.
         """
-        return AskObject(
-            x_jac=self._state.x,
+        return AskData(
+            x_jac=self.state.x,
         )
 
-    def tell(self, ask_object: AskObject, tell_object: TellObject) -> None:
+    def tell(self, ask_data: AskData, tell_data: TellData) -> None:
         """
-        For gradient descent this method updates :attr:`.~GradientDescentState.x` by an ammount
-        proportional to the learning rate and the gradient at that point.
-        """
-        update = tell_object.eval_jac
-        self._state.x = self._state.x - next(self._state.eta) * update
-        self._state.stepsize = np.linalg.norm(update)
-        self._state.nit += 1
+        Updates :attr:`.~GradientDescentState.x` by an ammount proportional to the learning
+        rate and value of the gradient at that point.
 
-    def evaluate(self, ask_object: AskObject) -> TellObject:
+        Args:
+            ask_data: The data used to evaluate the function.
+            tell_data: The data from the function evaluation.
         """
-        Evaluates the gradient, either by evaluating an analitic gradient or by approximating it with a
-        finite difference scheme.
-        The value of the gradient is returned as a :class:`qiskit.algorithms.optimizers.TellObject`.
+        self.state.x = self.state.x - next(self.state.eta) * tell_data.eval_jac
+        self.state.stepsize = np.linalg.norm(tell_data.eval_jac)
+        self.state.nit += 1
+
+    def evaluate(self, ask_data: AskData) -> TellData:
+        """Evaluates the gradient.
+        It does so either by evaluating an analitic gradient or by approximating it with a
+        finite difference scheme. It will either add ``1`` to the number of gradient evaluations or add
+        ``N+1`` to the number of function evaluations (Where N is the dimension of the gradient).
+
+        Args:
+            ask_data: It contains the point where the gradient is to be evaluated and the gradient
+                      function or in it's defect the objective function to perform a finite difference
+                      approximation.
+
+        Returns:
+        The data containing the gradient evaluation.
+
         """
-        if self._state.jac is None:
+        if self.state.jac is None:
             eps = 0.01 if self.perturbation is None else self.perturbation
             grad = Optimizer.gradient_num_diff(
-                x_center=ask_object.x_jac,
-                f=self._state.fun,
+                x_center=ask_data.x_jac,
+                f=self.state.fun,
                 epsilon=eps,
                 max_evals_grouped=self._max_evals_grouped,
             )
-            self._state.nfev += 1 + len(ask_object.x_jac)
+            self.state.nfev += 1 + len(ask_data.x_jac)
         else:
-            grad = self._state.jac(ask_object.x_jac)
-            self._state.njev += 1
+            grad = self.state.jac(ask_data.x_jac)
+            self.state.njev += 1
 
-        return TellObject(eval_jac=grad)
+        return TellData(eval_jac=grad)
 
     def create_result(self) -> OptimizerResult:
-        """Creates a result of the optimization process using the values from
-        :class:`~.GradientDescentState`.
+        """Creates a result of the optimization process.
+        This result contains the best point, the best function value, the number of function/gradient
+        evaluations and the number of iterations.
+
+        Returns:
+            The result of the optimization process.
         """
         result = OptimizerResult()
-        result.x = self._state.x
-        result.fun = self._state.fun(self._state.x)
-        result.nfev = self._state.nfev
-        result.njev = self._state.njev
-        result.nit = self._state.nit
+        result.x = self.state.x
+        result.fun = self.state.fun(self.state.x)
+        result.nfev = self.state.nfev
+        result.njev = self.state.njev
+        result.nit = self.state.nit
         return result
 
-    def initialize(
+    def start(
         self,
         fun: Callable[[POINT], float],
         x0: POINT,
         jac: Optional[Callable[[POINT], POINT]] = None,
         bounds: Optional[List[Tuple[float, float]]] = None,
     ) -> None:
-        """
-        This method will initialize the state of the optimizer so that an optimization can be performed.
-        It will always setup the initial point and will restart the counter for function evaluations.
-        This method is left blank because every optimizer has a different kind of state.
-        """
-        if isinstance(self.learning_rate, float):
-            eta = constant(self.learning_rate)
-        else:
-            eta = self.learning_rate()
 
-        self._state = GradientDescentState(
+        if isinstance(self.learning_rate, float):
+            eta = constant_generator(self.learning_rate)
+        else:
+            eta = self._learning_rate()
+
+        self.state = GradientDescentState(
             fun=fun,
             jac=jac,
             x=np.asarray(x0),
@@ -313,13 +369,14 @@ class GradientDescent(SteppableOptimizer):
         Condition that indicates the optimization process should come to an end.
         When the stepsize is smaller than the tolerance, the optimization process is considered
         finished.
+
         Returns:
             ``True`` if the optimization process should continue, ``False`` otherwise.
         """
-        if self._state.stepsize is None:
+        if self.state.stepsize is None:
             return True
         else:
-            return (self._state.stepsize > self.tol) and super().continue_condition()
+            return (self.state.stepsize > self.tol) and super().continue_condition()
 
     def get_support_level(self):
         """Get the support level dictionary."""
