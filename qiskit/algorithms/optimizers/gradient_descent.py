@@ -21,7 +21,7 @@ from .steppable_optimizer import AskData, TellData, OptimizerState, SteppableOpt
 CALLBACK = Callable[[int, np.ndarray, float, float], None]
 
 
-def constant_generator(eta: float = 0.01) -> Generator[float, None, None]:
+def constant(eta: float = 0.01) -> Generator[float, None, None]:
     """Returns a python generator that always yields the same value.
 
     Args:
@@ -366,7 +366,7 @@ class GradientDescent(SteppableOptimizer):
 
     def continue_condition(self) -> bool:
         """
-        Condition that indicates the optimization process should come to an end.
+        Condition that indicates the optimization process should continue.
         When the stepsize is smaller than the tolerance, the optimization process is considered
         finished.
 

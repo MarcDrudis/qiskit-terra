@@ -6,7 +6,7 @@ from typing import Union, Callable, Optional, List, Tuple, Dict
 import numpy as np
 from qiskit.algorithms.optimizers.optimizer import OptimizerSupportLevel, OptimizerResult, POINT
 from qiskit.algorithms.optimizers.steppable_optimizer import (
-    AskObject,
+    AskData,
     TellObject,
     OptimizerState,
     SteppableOptimizer,
@@ -16,11 +16,11 @@ CALLBACK = Callable[[], None]
 
 
 @dataclass
-class CMAES_AskObject(AskObject):
+class CMAES_AskData(AskData):
     """
     Args:
         x_fun_translation: The translation between the points to be evaluated and the current center
-        of the distribution.
+                           of the distribution.
     """
 
     x_fun_translation: Optional[Union[POINT, List[POINT]]] = None
@@ -33,9 +33,10 @@ class CMAESState(OptimizerState):
         p_sigma: Evolution path for the standard deviation of the distribution.
         p_c: Evolution path for the covariance matrix.
         cov_matrix: Covariance matrix.
-        eigenvectors:   Eigenvectors of the covariance matrix.
+        eigenvectors: Eigenvectors of the covariance matrix.
         std_vector: Standard deviation in each principal axis of the covariance matrix.
-        They can also be tought as the square root of the eigenvalues of the covariance matrix.
+                    They can also be tought as the square root of the eigenvalues of the
+                    covariance matrix.
         sigma: The standard deviation of the distribution.
     """
 
@@ -125,14 +126,35 @@ class CMAES(SteppableOptimizer):
         self.chiN = None
         self.termination_criteria = termination_criteria
 
-    def ask(self) -> CMAES_AskObject:
-        """ """
+    @property
+    def state(self) -> CMAESState:
+        """Return the current state of the optimizer."""
+        return self._state
+
+    @state.setter
+    def state(self, state: CMAESState) -> None:
+        """Set the current state of the optimizer."""
+        self._state = state
+
+    def ask(self) -> CMAES_AskData:
+        """Returns teh data needed to perform the evaluations in the next generation.
+        This data consists of a centroid :attr:`.~CMAES_AskData.x_fun` and a translation
+        :attr:`.~CMAES_AskData.x_fun_translation`.
+        """
         z = np.random.normal(0, 1, size=(self.lmbda, self.N))
         y = np.einsum("ij,j,kj->ki", self._state.eigenvectors, self._state.std_vector, z)
         x = self._state.x + self._state.sigma * y
-        return CMAES_AskObject(x_fun=x, x_jac=None, x_fun_translation=z)
+        return CMAES_AskData(x_fun=x, x_jac=None, x_fun_translation=z)
 
-    def tell(self, ask_object: AskObject, tell_object: TellObject) -> None:
+    def tell(self, ask_object: CMAES_AskData, tell_object: TellObject) -> None:
+        """
+        Updates the centroid of the distribution as well as the covariance matrix and the evolution
+        paths. In order to see how each of these are updated, see the paper.
+
+        Args:
+            ask_data: The data used to evaluate the function.
+            tell_data: The data from the function evaluation.
+        """
         self._state.nit += 1
         # We sort the sampled points by the function value. And keep the mu best points.
         sorting_indexes = np.argsort(tell_object.eval_fun)
@@ -202,6 +224,7 @@ class CMAES(SteppableOptimizer):
         ]
         self._state._worst_func_eval = np.max(tell_object.eval_fun)
 
+
     def evaluate(self, ask_object: AskObject) -> TellObject:
         eval_fun = [self._state.fun(x) for x in ask_object.x_fun]
         self._state.nfev += len(ask_object.x_fun)
@@ -218,17 +241,13 @@ class CMAES(SteppableOptimizer):
         result.nit = self._state.nit
         return result
 
-    def initialize(
+    def start(
         self,
         x0: POINT,
         fun: Callable[[POINT], float],
         jac: Callable[[POINT], POINT] = None,
         bounds: Optional[List[Tuple[float, float]]] = None,
     ) -> None:
-        """
-        This method will initialize the state of the optimizer so that an optimization can be performed.
-        It will also set some parameters needed for the optimization.
-        """
         # initialize state
         self._state = CMAESState(
             x=x0,
@@ -318,8 +337,8 @@ class CMAES(SteppableOptimizer):
         return 0.2 * np.max(np.diag(self._state.cov_matrix)) >= np.linalg.norm(self._state.x) * tol
 
     def _ConditionCov(self, tol: float) -> bool:
-        """What is condition number???"""
-        return True
+        """"""
+        return self.state.std_vector.max() < tol * self.state.std_vector.min()
 
     def _EqualFunValues(self, tol: float) -> bool:
         """Termination criteria if the range of the best evaluation during the last 10+ 30*N/lmbda
@@ -364,13 +383,20 @@ class CMAES(SteppableOptimizer):
         )
 
     def get_stopping_condition(self) -> Dict[str,bool]:
+        """Once the optimization is done, this method returns a dictionary with the termination
+        criteria that has been met on the last generation.
+        """
         stop_dict = {}
         for key, value in self.termination_criteria.items():
-            stop_dict[key] = getattr(self, "_" + key)(value)
+            stop_dict[key] = not getattr(self, "_" + key)(value)
         return stop_dict
+
     def continue_condition(self) -> bool:
-        """
-        This is the condition that will be checked after each step to stop the optimization process.
+        """Condition stating if the optimization process should continue for one more generation.
+        Since there are several possible stopping conditions described in the paper, the user will
+        need to pass a dictionary containing which of the stopping conditions to use and a tolerance
+        for each one. This method will simply check each one of those conditions and return ``True``
+        if all of them are met.
         """
         cont_cond = True
         for key, value in self.termination_criteria.items():
@@ -391,10 +417,10 @@ class CMAES(SteppableOptimizer):
                 kwargs[argument] = getattr(self._state, argument)
             self.callback(**kwargs)
 
-    def get_support_level(self):
-        """Get the support level dictionary."""
-        return {
-            "gradient": OptimizerSupportLevel.supported,
-            "bounds": OptimizerSupportLevel.ignored,
-            "initial_point": OptimizerSupportLevel.required,
-        }
+    # def get_support_level(self):
+    #     """Get the support level dictionary."""
+    #     return {
+    #         "gradient": OptimizerSupportLevel.supported,
+    #         "bounds": OptimizerSupportLevel.ignored,
+    #         "initial_point": OptimizerSupportLevel.required,
+    #     }

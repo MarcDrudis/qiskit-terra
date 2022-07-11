@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from typing import Union, Callable, Optional, Tuple, List, Any
 from .optimizer import Optimizer, POINT, OptimizerResult
 
-CALLBACK = Callable[[Any], None]
-
 
 @dataclass
 class AskData(ABC):
