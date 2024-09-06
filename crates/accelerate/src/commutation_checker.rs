@@ -28,7 +28,7 @@ use qiskit_circuit::circuit_instruction::{ExtraInstructionAttributes, OperationF
 use qiskit_circuit::dag_node::DAGOpNode;
 use qiskit_circuit::imports::QI_OPERATOR;
 use qiskit_circuit::operations::OperationRef::{Gate as PyGateType, Operation as PyOperationType};
-use qiskit_circuit::operations::{Operation, OperationRef, Param};
+use qiskit_circuit::operations::{Operation, OperationRef, Param, StandardGate};
 use qiskit_circuit::{BitType, Clbit, Qubit};
 
 use crate::unitary_compose;
@@ -38,9 +38,24 @@ static SKIPPED_NAMES: [&str; 4] = ["measure", "reset", "delay", "initialize"];
 static NO_CACHE_NAMES: [&str; 2] = ["annotated", "linear_function"];
 static SUPPORTED_OP: Lazy<HashSet<&str>> = Lazy::new(|| {
     HashSet::from([
-        "h", "x", "y", "z", "sx", "sxdg", "t", "tdg", "s", "sdg", "cx", "cy", "cz", "swap",
-        "iswap", "ecr", "ccx", "cswap",
+        "rxx", "ryy", "rzz", "rzx", "h", "x", "y", "z", "sx", "sxdg", "t", "tdg", "s", "sdg", "cx",
+        "cy", "cz", "swap", "iswap", "ecr", "ccx", "cswap",
     ])
+});
+static SUPPORTED_ROTATIONS: Lazy<HashMap<&str, OperationRef>> = Lazy::new(|| {
+    [
+        ("rx", StandardGate::XGate),
+        ("ry", StandardGate::YGate),
+        ("rz", StandardGate::ZGate),
+        ("p", StandardGate::ZGate),
+        ("u1", StandardGate::ZGate),
+        ("crx", StandardGate::CXGate),
+        ("cry", StandardGate::CYGate),
+        ("crz", StandardGate::CZGate),
+    ]
+    .into_iter()
+    .map(|(name, gate)| (name, OperationRef::Standard(gate)))
+    .collect()
 });
 
 fn get_bits<T>(
@@ -89,6 +104,7 @@ impl CommutationChecker {
     ) -> Self {
         // Initialize sets before they are used in the commutation checker
         Lazy::force(&SUPPORTED_OP);
+        Lazy::force(&SUPPORTED_ROTATIONS);
         CommutationChecker {
             library: CommutationLibrary::new(standard_gate_commutations),
             cache: HashMap::new(),
@@ -242,6 +258,15 @@ impl CommutationChecker {
         cargs2: &[Clbit],
         max_num_qubits: u32,
     ) -> PyResult<bool> {
+        let (op1, params1, trivial1): (&OperationRef, &[Param], bool) = map_rotation(op1, params1);
+        if trivial1 {
+            return Ok(true);
+        }
+        let (op2, params2, trivial2): (&OperationRef, &[Param], bool) = map_rotation(op2, params2);
+        if trivial2 {
+            return Ok(true);
+        }
+
         if let Some(gates) = &self.gates {
             if !gates.is_empty() && (!gates.contains(op1.name()) || !gates.contains(op2.name())) {
                 return Ok(false);
@@ -286,7 +311,9 @@ impl CommutationChecker {
             NO_CACHE_NAMES.contains(&second_op.name()) ||
             // Skip params that do not evaluate to floats for caching and commutation library
             first_params.iter().any(|p| !matches!(p, Param::Float(_))) ||
-            second_params.iter().any(|p| !matches!(p, Param::Float(_)));
+            second_params.iter().any(|p| !matches!(p, Param::Float(_)))
+            && !SUPPORTED_OP.contains(op1.name())
+            && !SUPPORTED_OP.contains(op2.name());
 
         if skip_cache {
             return self.commute_matmul(
@@ -574,6 +601,27 @@ where
         || params
             .iter()
             .any(|x| matches!(x, Param::ParameterExpression(_)))
+}
+
+// fn map_rotation(op:&OperationRef, params:&[Param])->(&OperationRef,&[Param]){
+fn map_rotation<'a>(
+    op: &'a OperationRef<'a>,
+    params: &'a [Param],
+) -> (&'a OperationRef<'a>, &'a [Param], bool) {
+    // let (new_op, new_params): (&OperationRef, &[Param]) =
+    match SUPPORTED_ROTATIONS.get(op.name()) {
+        Some(gate) => {
+            if let Param::Float(angle) = params[0] {
+                if angle % std::f64::consts::PI == 0.0 {
+                    return (gate, &[], true);
+                }
+            }
+            (gate, &[], false)
+        }
+        None => (op, params, false),
+    }
+
+    // (new_op,new_params,false)
 }
 
 fn get_relative_placement(
