@@ -42,20 +42,25 @@ static SUPPORTED_OP: Lazy<HashSet<&str>> = Lazy::new(|| {
         "cy", "cz", "swap", "iswap", "ecr", "ccx", "cswap",
     ])
 });
-static SUPPORTED_ROTATIONS: Lazy<HashMap<&str, OperationRef>> = Lazy::new(|| {
-    [
-        ("rx", StandardGate::XGate),
-        ("ry", StandardGate::YGate),
-        ("rz", StandardGate::ZGate),
-        ("p", StandardGate::ZGate),
-        ("u1", StandardGate::ZGate),
-        ("crx", StandardGate::CXGate),
-        ("cry", StandardGate::CYGate),
-        ("crz", StandardGate::CZGate),
-    ]
-    .into_iter()
-    .map(|(name, gate)| (name, OperationRef::Standard(gate)))
-    .collect()
+
+// map rotation gates to their generators, or to ``None`` if we cannot currently efficiently
+// represent the generator in Rust and store the commutation relation in the commutation dictionary
+static SUPPORTED_ROTATIONS: Lazy<HashMap<&str, Option<OperationRef>>> = Lazy::new(|| {
+    HashMap::from([
+        ("rx", Some(OperationRef::Standard(StandardGate::XGate))),
+        ("ry", Some(OperationRef::Standard(StandardGate::YGate))),
+        ("rz", Some(OperationRef::Standard(StandardGate::ZGate))),
+        ("p", Some(OperationRef::Standard(StandardGate::ZGate))),
+        ("u1", Some(OperationRef::Standard(StandardGate::ZGate))),
+        ("crx", Some(OperationRef::Standard(StandardGate::CXGate))),
+        ("cry", Some(OperationRef::Standard(StandardGate::CYGate))),
+        ("crz", Some(OperationRef::Standard(StandardGate::CZGate))),
+        ("cp", Some(OperationRef::Standard(StandardGate::CZGate))),
+        ("rxx", None), // None means the gate is in the commutation dictionary
+        ("ryy", None),
+        ("rzx", None),
+        ("rzz", None),
+    ])
 });
 
 fn get_bits<T>(
@@ -258,11 +263,19 @@ impl CommutationChecker {
         cargs2: &[Clbit],
         max_num_qubits: u32,
     ) -> PyResult<bool> {
-        let (op1, params1, trivial1): (&OperationRef, &[Param], bool) = map_rotation(op1, params1);
+        // relative and absolute tolerance used to (1) check whether rotation gates commute
+        // trivially (i.e. the rotation angle is so small we assume it commutes) and (2) define
+        // comparison for the matrix-based commutation checks
+        let rtol = 1e-5;
+        let atol = 1e-8;
+
+        // if we have rotation gates, we attempt to map them to their generators, for example
+        // RX -> X or CPhase -> CZ
+        let (op1, params1, trivial1) = map_rotation(op1, params1, rtol);
         if trivial1 {
             return Ok(true);
         }
-        let (op2, params2, trivial2): (&OperationRef, &[Param], bool) = map_rotation(op2, params2);
+        let (op2, params2, trivial2) = map_rotation(op2, params2, rtol);
         if trivial2 {
             return Ok(true);
         }
@@ -324,6 +337,8 @@ impl CommutationChecker {
                 second_op,
                 second_params,
                 second_qargs,
+                rtol,
+                atol,
             );
         }
 
@@ -358,6 +373,8 @@ impl CommutationChecker {
             second_op,
             second_params,
             second_qargs,
+            rtol,
+            atol,
         )?;
 
         // TODO: implement a LRU cache for this
@@ -392,6 +409,8 @@ impl CommutationChecker {
         second_op: &OperationRef,
         second_params: &[Param],
         second_qargs: &[Qubit],
+        rtol: f64,
+        atol: f64,
     ) -> PyResult<bool> {
         // Compute relative positioning of qargs of the second gate to the first gate.
         // Since the qargs come out the same BitData, we already know there are no accidential
@@ -432,8 +451,6 @@ impl CommutationChecker {
             None => return Ok(false),
         };
 
-        let rtol = 1e-5;
-        let atol = 1e-8;
         if first_qarg == second_qarg {
             match first_qarg.len() {
                 1 => Ok(unitary_compose::commute_1q(
@@ -595,25 +612,39 @@ where
             .any(|x| matches!(x, Param::ParameterExpression(_)))
 }
 
-// fn map_rotation(op:&OperationRef, params:&[Param])->(&OperationRef,&[Param]){
+/// Check if a given operation can be mapped onto a generator.
+///
+/// If ``op`` is in the ``SUPPORTED_ROTATIONS`` hashmap, it is a rotation and we
+///   (1) check whether the rotation is so small (modulo pi) that we assume it is the
+///       identity and it commutes trivially with every other operation
+///   (2) otherwise, we check whether a generator of the rotation is given (e.g. X for RX)
+///       and we return the generator
+///
+/// Returns (operation, parameters, commutes_trivially).
 fn map_rotation<'a>(
     op: &'a OperationRef<'a>,
     params: &'a [Param],
+    tol: f64,
 ) -> (&'a OperationRef<'a>, &'a [Param], bool) {
-    // let (new_op, new_params): (&OperationRef, &[Param]) =
-    match SUPPORTED_ROTATIONS.get(op.name()) {
-        Some(gate) => {
-            if let Param::Float(angle) = params[0] {
-                if angle % std::f64::consts::PI == 0.0 {
-                    return (gate, &[], true);
-                }
-            }
-            (gate, &[], false)
-        }
-        None => (op, params, false),
-    }
+    let name = op.name();
+    if let Some(generator) = SUPPORTED_ROTATIONS.get(name) {
+        // if the rotation angle is below the tolerance, the gate is assumed to
+        // commute with everything, and we simply return the operation with the flag that
+        // it commutes trivially
+        if let Param::Float(angle) = params[0] {
+            if (angle % std::f64::consts::PI).abs() < tol {
+                return (op, params, true);
+            };
+        };
 
-    // (new_op,new_params,false)
+        // otherwise, we check if a generator is given -- if not, we'll just return the operation
+        // itself (e.g. RXX does not have a generator and is just stored in the commutations
+        // dictionary)
+        if let Some(gate) = generator {
+            return (gate, &[], false);
+        };
+    }
+    (op, params, false)
 }
 
 fn get_relative_placement(
